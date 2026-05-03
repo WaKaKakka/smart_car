@@ -200,22 +200,6 @@ if (output < -1000) output = -1000;
 │  回到循环起点                         │
 └──────────────────────────────────────┘
 ```
-
----
-
-## 构建命令
-
-```bash
-# 配置
-cmake --preset Debug
-
-# 编译
-cmake --build build/Debug
-
-# 清理
-cmake --build build/Debug --target clean
-```
-
 ---
 
 ## 当前参数
