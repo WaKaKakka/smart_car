@@ -48,6 +48,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     modules/src/PWM.c
     modules/src/oled.c
     modules/src/font.c
+    modules/src/PID.c
     )
 
 # Add include paths

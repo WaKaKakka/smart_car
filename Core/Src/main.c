@@ -27,6 +27,7 @@
 #include <stdio.h>
 #include "PWM.h"
 #include "OLED.h"
+#include "PID.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -48,8 +49,18 @@
 
 /* USER CODE BEGIN PV */
 volatile uint8_t  oled_update_flag = 0;   // 更新标志位
-int16_t           speed_count    = 0;     // 修改为 int16_t，用于保存规定时间内的脉冲数(支持正负数)
-char              message[24]    = "";
+int16_t           pulse_count    = 0;     // 1秒内的脉冲数
+int16_t           current_rpm    = 0;     // 当前转速(RPM)，用整数避免浮点问题
+char              line1[24]    = "";
+char              line2[24]    = "";
+
+// 编码器参数：每转一圈1040个脉冲（260线 × 4倍频）
+// 采样周期1秒，转换公式：RPM = pulse_count * 60 / 1040
+// 为避免浮点运算，使用整数：RPM = pulse_count * 60 / 1040 ≈ pulse_count * 3 / 52
+#define PULSES_TO_RPM(p)  ((int16_t)((p) * 60 / 1040))
+
+PID_t speed_pid;
+int16_t target_rpm = 300;  // 目标转速(RPM)，额定400，最大550
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -107,29 +118,41 @@ int main(void)
   HAL_TIM_Encoder_Start(&htim2, TIM_CHANNEL_ALL);
   HAL_TIM_Base_Start_IT(&htim3);
   OLED_Init();
+
+  // 初始化PID: Kp, Ki, Kd, 输出限幅, 积分限幅
+  // 使用较小的PID参数减少震荡
+  PID_Init(&speed_pid, 1.0f, 0.2f, 0.05f, 800, 300);
+  PID_SetTarget(&speed_pid, (float)target_rpm);
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
   {
-    TB6612_SetSpeed(1, 1000);
-    
     if (oled_update_flag)
     {
       oled_update_flag = 0;  // 清除更新标志位
-      
-      // 1. 获取当前计数器的值，并强制转换为有符号的16位整数（解决65535变负数的问题）
-      speed_count = (int16_t)__HAL_TIM_GET_COUNTER(&htim2);
-      
-      // 2. 核心：读取完之后，立刻将定时器计数器清零！
+
+      // 1. 获取当前计数器的值，并强制转换为有符号的16位整数
+      pulse_count = (int16_t)__HAL_TIM_GET_COUNTER(&htim2);
+
+      // 2. 读取完之后，立刻将定时器计数器清零
       __HAL_TIM_SET_COUNTER(&htim2, 0);
-      
-      // 3. 格式化打印 (注意后面加几个空格，防止数字变短时OLED屏幕留下残留字符)
-      sprintf(message,"Speed: %d    ", speed_count);
-      
+
+      // 3. 脉冲数转换为RPM（整数运算）
+      current_rpm = PULSES_TO_RPM(pulse_count);
+
+      // 4. PID计算并设置电机速度（输入RPM，输出PWM）
+      float pid_output = PID_IncrementalCalc(&speed_pid, (float)current_rpm);
+      TB6612_SetSpeed(1, (int16_t)pid_output);
+
+      // 5. 格式化显示目标转速和当前转速(RPM) - 使用%d避免浮点问题
+      sprintf(line1, "Target:%d RPM", target_rpm);
+      sprintf(line2, "Speed: %d RPM", current_rpm);
+
       OLED_NewFrame();
-      OLED_PrintASCIIString(0, 0, message, &afont16x8, OLED_COLOR_NORMAL);
+      OLED_PrintASCIIString(0, 0, line1, &afont16x8, OLED_COLOR_NORMAL);
+      OLED_PrintASCIIString(0, 20, line2, &afont16x8, OLED_COLOR_NORMAL);
       OLED_ShowFrame();
     }
     /* USER CODE END WHILE */
