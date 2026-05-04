@@ -61,6 +61,10 @@ void Error_Handler(void);
 #define AIN1_GPIO_Port GPIOA
 #define AIN2_Pin GPIO_PIN_5
 #define AIN2_GPIO_Port GPIOA
+#define BIN1_Pin GPIO_PIN_6
+#define BIN1_GPIO_Port GPIOA
+#define BIN2_Pin GPIO_PIN_7
+#define BIN2_GPIO_Port GPIOA
 
 /* USER CODE BEGIN Private defines */
 

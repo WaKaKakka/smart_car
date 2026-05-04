@@ -28,6 +28,9 @@
 #include "PWM.h"
 #include "OLED.h"
 #include "PID.h"
+#include "motion.h"
+#include "trace_task.h"
+#include "line_sensor.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -48,19 +51,11 @@
 /* Private variables ---------------------------------------------------------*/
 
 /* USER CODE BEGIN PV */
-volatile uint8_t  oled_update_flag = 0;   // 更新标志位
-int16_t           pulse_count    = 0;     // 1秒内的脉冲数
-int16_t           current_rpm    = 0;     // 当前转速(RPM)，用整数避免浮点问题
+volatile uint8_t  oled_update_flag = 0;   // OLED更新标志位
+volatile uint8_t  motion_tick = 0;        // 10ms运动控制计数器
+volatile uint8_t  line_follow_flag = 0;   // 巡线执行标志位
 char              line1[24]    = "";
 char              line2[24]    = "";
-
-// 编码器参数：每转一圈1040个脉冲（260线 × 4倍频）
-// 采样周期1秒，转换公式：RPM = pulse_count * 60 / 1040
-// 为避免浮点运算，使用整数：RPM = pulse_count * 60 / 1040 ≈ pulse_count * 3 / 52
-#define PULSES_TO_RPM(p)  ((int16_t)((p) * 60 / 1040))
-
-PID_t speed_pid;
-int16_t target_rpm = 300;  // 目标转速(RPM)，额定400，最大550
 /* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
@@ -72,12 +67,21 @@ void SystemClock_Config(void);
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
-  {
+{
     if (htim->Instance == TIM3)
     {
-      oled_update_flag = 1;  // 仅置位，不执行任何耗时操作
+        // TIM3 现在是10ms周期
+        Motion_Handle();  // 每10ms执行一次速度闭环控制
+
+        motion_tick++;
+        if (motion_tick >= 5)  // 5 * 10ms = 50ms，巡线周期
+        {
+            motion_tick = 0;
+            line_follow_flag = 1;  // 通知主循环执行巡线
+        }
+        oled_update_flag = 1;  // 每10ms更新OLED（主循环中按需降频）
     }
-  }
+}
 /* USER CODE END 0 */
 
 /**
@@ -111,49 +115,66 @@ int main(void)
   MX_GPIO_Init();
   MX_TIM1_Init();
   MX_TIM2_Init();
+  MX_TIM8_Init();
   MX_I2C1_Init();
   MX_TIM3_Init();
   /* USER CODE BEGIN 2 */
   HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_1);
+  HAL_TIM_PWM_Start(&htim1, TIM_CHANNEL_2);
   HAL_TIM_Encoder_Start(&htim2, TIM_CHANNEL_ALL);
+  HAL_TIM_Encoder_Start(&htim8, TIM_CHANNEL_ALL);
   HAL_TIM_Base_Start_IT(&htim3);
   OLED_Init();
 
-  // 初始化PID: Kp, Ki, Kd, 输出限幅, 积分限幅
-  // 使用较小的PID参数减少震荡
-  PID_Init(&speed_pid, 1.0f, 0.2f, 0.05f, 800, 300);
-  PID_SetTarget(&speed_pid, (float)target_rpm);
+  // 初始化灰度传感器
+  Grayscale_Sensor_Init();
+
+  // 初始化运动控制（PID速度闭环）
+  Motion_Init();
+
+  // 初始化巡线控制器
+  line_following_init(&g_line_controller);
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
   while (1)
   {
+    // 每50ms执行一次巡线决策（由ISR通过line_follow_flag触发）
+    if (line_follow_flag)
+    {
+      line_follow_flag = 0;
+      follow_line(&g_line_controller);
+    }
+
+    // 每秒更新一次OLED显示
     if (oled_update_flag)
     {
-      oled_update_flag = 0;  // 清除更新标志位
+      oled_update_flag = 0;
 
-      // 1. 获取当前计数器的值，并强制转换为有符号的16位整数
-      pulse_count = (int16_t)__HAL_TIM_GET_COUNTER(&htim2);
+      static uint8_t oled_div = 0;
+      oled_div++;
+      if (oled_div >= 100)  // 100 * 10ms = 1秒
+      {
+        oled_div = 0;
 
-      // 2. 读取完之后，立刻将定时器计数器清零
-      __HAL_TIM_SET_COUNTER(&htim2, 0);
+        // 显示灰度传感器状态和巡线信息
+        uint16_t sensors[GRAYSCALE_SENSOR_CHANNELS];
+        Grayscale_Sensor_Read_All(sensors);
 
-      // 3. 脉冲数转换为RPM（整数运算）
-      current_rpm = PULSES_TO_RPM(pulse_count);
+        sprintf(line1, "S:%d%d%d%d%d%d%d%d",
+                sensors[0], sensors[1], sensors[2], sensors[3],
+                sensors[4], sensors[5], sensors[6], sensors[7]);
+        // 将 last_error 放大10倍显示为整数，避免浮点格式化
+        int err_x10 = (int)(g_line_controller.last_error * 10.0f);
+        sprintf(line2, "Spd:%d E:%d",
+                g_line_controller.base_speed, err_x10);
 
-      // 4. PID计算并设置电机速度（输入RPM，输出PWM）
-      float pid_output = PID_IncrementalCalc(&speed_pid, (float)current_rpm);
-      TB6612_SetSpeed(1, (int16_t)pid_output);
-
-      // 5. 格式化显示目标转速和当前转速(RPM) - 使用%d避免浮点问题
-      sprintf(line1, "Target:%d RPM", target_rpm);
-      sprintf(line2, "Speed: %d RPM", current_rpm);
-
-      OLED_NewFrame();
-      OLED_PrintASCIIString(0, 0, line1, &afont16x8, OLED_COLOR_NORMAL);
-      OLED_PrintASCIIString(0, 20, line2, &afont16x8, OLED_COLOR_NORMAL);
-      OLED_ShowFrame();
+        OLED_NewFrame();
+        OLED_PrintASCIIString(0, 0, line1, &afont16x8, OLED_COLOR_NORMAL);
+        OLED_PrintASCIIString(0, 20, line2, &afont16x8, OLED_COLOR_NORMAL);
+        OLED_ShowFrame();
+      }
     }
     /* USER CODE END WHILE */
 
