@@ -54,6 +54,7 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     modules/src/delay.c
     modules/src/motion.c
     modules/src/trace_task.c
+    modules/src/encoder.c
     )
 
 # Add include paths
